@@ -1,5 +1,6 @@
 mod scanner;
 mod ollama;
+mod claude_cli;
 
 pub fn run() {
     let app = tauri::Builder::default()
@@ -16,6 +17,7 @@ pub fn run() {
             ollama::ollama_uninstall,
             ollama::ollama_pull_model,
             ollama::ollama_delete_model,
+            claude_cli::call_claude_cli,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {

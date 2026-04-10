@@ -332,7 +332,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         await callBackend('ollama_pull_model', { modelName: selectedPreset });
         setPulling(false); setPullProgress(null);
       }
-      const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
+      const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset, use_claude_cli: false };
       setLocalConfig(newConfig);
       await saveConfig(newConfig);
       const status = await callBackend('ollama_get_status');
@@ -356,7 +356,7 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
         toast.info('Local AI stopped');
       } else {
         await callBackend('ollama_start');
-        const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset };
+        const newConfig = { ...localConfig, use_local_ai: true, ollama_model: selectedPreset, use_claude_cli: false };
         setLocalConfig(newConfig);
         await saveConfig(newConfig);
         toast.success('Local AI started');
@@ -773,6 +773,51 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                     <div className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${localConfig.local_skip_dna ? 'translate-x-5' : 'translate-x-0.5'}`} />
                   </button>
                 </div>
+              </div>
+            )}
+
+            {isTauri() && (
+              <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-purple-400" />
+                    <h3 className="text-lg font-semibold text-white">Claude CLI</h3>
+                  </div>
+                  {localConfig.use_claude_cli && (
+                    <div className="flex items-center gap-1.5">
+                      <div className="w-2 h-2 rounded-full bg-purple-400" />
+                      <span className="text-xs text-purple-400">Active</span>
+                    </div>
+                  )}
+                </div>
+                <p className="text-sm text-gray-400">
+                  Use your Claude Enterprise or Pro subscription — no API key needed. Requires the <code className="text-xs bg-neutral-800 px-1 py-0.5 rounded">claude</code> CLI installed and logged in.
+                </p>
+                <Toggle
+                  checked={!!localConfig.use_claude_cli}
+                  onChange={(v) => setLocalConfig({ ...localConfig, use_claude_cli: v, use_local_ai: v ? false : localConfig.use_local_ai })}
+                  label="Use Claude CLI as AI provider"
+                />
+                {localConfig.use_claude_cli && (
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-1.5">Model</label>
+                      <select
+                        value={localConfig.claude_cli_model || 'sonnet'}
+                        onChange={(e) => setLocalConfig({ ...localConfig, claude_cli_model: e.target.value })}
+                        className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                      >
+                        <option value="haiku">Claude Haiku (Fastest)</option>
+                        <option value="sonnet">Claude Sonnet (Recommended)</option>
+                        <option value="opus">Claude Opus (Best quality)</option>
+                      </select>
+                    </div>
+                    <div className="text-xs text-gray-500 space-y-1">
+                      <p>Setup: install from <a href="https://claude.ai/code" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">claude.ai/code</a>, then run <code className="bg-neutral-800 px-1 py-0.5 rounded">claude auth login</code> in a terminal.</p>
+                      <p className="text-amber-500/70">Each book triggers one CLI process. Expect ~5–20s per book depending on your plan's rate limits.</p>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

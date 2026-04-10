@@ -20,16 +20,28 @@ function getSystemPrompt(config) {
   return config?.custom_system_prompt?.trim() || SYSTEM_PROMPT;
 }
 
+/** Returns true when the provider can only handle one request at a time.
+ *  Ollama: single local process.
+ *  Claude CLI: spawns a subprocess per call — parallelism causes rate-limit errors. */
+function isSequentialProvider(config) {
+  return !!(config?.use_claude_cli || (config?.use_local_ai && config?.ollama_model));
+}
+
 /** Get the effective DNA system prompt (custom override or default).
- *  Uses compact prompt for local AI — fewer fields, ~50% less output. */
+ *  Uses compact prompt for Ollama only — fewer fields, ~50% less output.
+ *  Claude CLI and cloud providers get the full prompt. */
 function getDnaSystemPrompt(config) {
   if (config?.custom_dna_prompt?.trim()) return config.custom_dna_prompt.trim();
-  const isLocal = !!(config?.use_local_ai && config?.ollama_model);
-  return isLocal ? BOOK_DNA_SYSTEM_PROMPT_COMPACT : BOOK_DNA_SYSTEM_PROMPT;
+  const isOllama = !!(config?.use_local_ai && config?.ollama_model);
+  return isOllama ? BOOK_DNA_SYSTEM_PROMPT_COMPACT : BOOK_DNA_SYSTEM_PROMPT;
 }
 
 /** Throw early if the AI config is clearly misconfigured, before starting a batch. */
 function validateAIConfig(config) {
+  if (config.use_claude_cli) {
+    // Auth is managed externally via `claude auth login` — nothing to validate here.
+    return;
+  }
   if (config.use_local_ai) {
     if (!config.ollama_model) throw new Error('No Ollama model selected. Choose one in Settings > Local AI.');
   } else {
@@ -61,6 +73,8 @@ const DEFAULT_CONFIG = {
   ai_base_url: 'https://api.openai.com',
   use_local_ai: false,
   ollama_model: null,
+  use_claude_cli: false,
+  claude_cli_model: 'sonnet',
   local_concurrency: 2,
   cloud_concurrency: 5,
   local_skip_dna: true,
@@ -381,7 +395,6 @@ const HANDLERS = {
   // === Full Pipeline (matching desktop process_with_pipeline) ===
   process_with_pipeline: async (args) => {
     const config = getLocalConfig();
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const request = args.request || {};
     const books = request.books || [];
     const results = [];
@@ -471,9 +484,9 @@ const HANDLERS = {
   resolve_metadata_batch: async (args) => {
     const config = getLocalConfig();
     const books = args.books || [];
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
-    const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
-    const BATCH_SIZE = isLocalAI ? 3 : 1;
+    const isOllamaAI = !!(config.use_local_ai && config.ollama_model);
+    const CONCURRENCY = isSequentialProvider(config) ? 1 : (config.cloud_concurrency || 5);
+    const BATCH_SIZE = isOllamaAI ? 3 : 1;
     const results = [];
     let completed = 0;
 
@@ -492,8 +505,8 @@ const HANDLERS = {
       return { id: book.id, title, author, subtitle, series, sequence, narrator, confidence: parsed.confidence || 75, changed };
     };
 
-    if (isLocalAI && books.length > 1) {
-      // LOCAL AI: Batch 5 books per prompt
+    if (isOllamaAI && books.length > 1) {
+      // LOCAL AI (Ollama): Batch 5 books per prompt
       for (let i = 0; i < books.length; i += BATCH_SIZE) {
         const batch = books.slice(i, i + BATCH_SIZE);
         const batchNames = batch.map(b => b.current_title).join(', ');
@@ -600,10 +613,10 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     validateAIConfig(config);
     resetBatchCancel();
     const books = args.books || [];
-    const isLocal = !!(config.use_local_ai && config.ollama_model);
-    const dnaEnabled = (args.dnaEnabled !== false) && !(isLocal && config.local_skip_dna);
-    const CONCURRENCY = isLocal ? 1 : (config.cloud_concurrency || 5);
-    const BATCH_SIZE = isLocal ? 3 : 1; // Local: batch 3 books per prompt (small models struggle with 5+)
+    const isOllama = !!(config.use_local_ai && config.ollama_model);
+    const dnaEnabled = (args.dnaEnabled !== false) && !(isOllama && config.local_skip_dna);
+    const CONCURRENCY = isSequentialProvider(config) ? 1 : (config.cloud_concurrency || 5);
+    const BATCH_SIZE = isOllama ? 3 : 1; // Ollama: batch 3 books per prompt (small models struggle with 5+)
     const results = [];
 
     // Helper: parse age_rating into tags
@@ -639,7 +652,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       intended_for_kids: parsed.age_rating?.intended_for_kids || false,
     });
 
-    if (isLocal) {
+    if (isOllama) {
       // LOCAL AI: Batch multiple books per prompt to reduce prompt eval overhead
       let completed = 0;
       for (let i = 0; i < books.length; i += BATCH_SIZE) {
@@ -759,8 +772,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     validateAIConfig(config);
     resetBatchCancel();
     const books = args.books || [];
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
-    const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
+    const CONCURRENCY = isSequentialProvider(config) ? 1 : (config.cloud_concurrency || 5);
     const results = [];
     let completed = 0;
 
@@ -797,8 +809,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     validateAIConfig(config);
     resetBatchCancel();
     const books = args.books || args.request?.books || [];
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
-    const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
+    const CONCURRENCY = isSequentialProvider(config) ? 1 : (config.cloud_concurrency || 5);
     const results = [];
     let completed = 0;
 
@@ -883,7 +894,6 @@ Return JSON: {"genres":["Genre1","Genre2"]}`;
     const config = getLocalConfig();
     validateAIConfig(config);
     resetBatchCancel();
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const books = args.books || [];
     const dnaEnabled = args.dnaEnabled !== false; // default ON
     const results = [];
@@ -1067,7 +1077,6 @@ Return JSON: {"year":"2005"}`;
     const config = getLocalConfig();
     validateAIConfig(config);
     resetBatchCancel();
-    const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const items = args.request?.items || args.items || [];
     const results = [];
     let completed = 0;

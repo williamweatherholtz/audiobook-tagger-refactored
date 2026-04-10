@@ -295,15 +295,35 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
 }
 
 /**
- * Call the configured AI provider (OpenAI or Anthropic).
- * Auto-detects based on model name.
+ * Call Claude CLI (claude --print) as an AI provider.
+ * Only works in the Tauri desktop app — requires `claude` on PATH and authenticated.
+ * Install: https://claude.ai/code  Then: claude auth login
+ * @param {string} systemPrompt
+ * @param {string} userPrompt
+ * @param {string} model - e.g. 'sonnet', 'opus', 'haiku' or a full model ID
+ */
+export async function callClaudeCli(systemPrompt, userPrompt, model = 'sonnet') {
+  if (!isTauri()) {
+    throw new Error('Claude CLI is only available in the desktop app. Use an API key provider in the browser.');
+  }
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke('call_claude_cli', { systemPrompt, userPrompt, model });
+}
+
+/**
+ * Call the configured AI provider (OpenAI, Anthropic, Claude CLI, or Ollama).
  * @param {object} config - App config with api keys and model settings
  * @param {string} systemPrompt
  * @param {string} userPrompt
  * @param {number} maxTokens
  */
 export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000) {
-  // Local AI takes priority
+  // Claude CLI (Enterprise subscription — no API key needed)
+  if (config.use_claude_cli) {
+    return callClaudeCli(systemPrompt, userPrompt, config.claude_cli_model || 'sonnet');
+  }
+
+  // Local AI (Ollama)
   if (config.use_local_ai && config.ollama_model) {
     return callOllama(systemPrompt, userPrompt, {
       model: config.ollama_model,
