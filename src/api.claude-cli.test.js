@@ -432,3 +432,75 @@ describe('fix_descriptions_with_gpt — Claude CLI', () => {
     expect(trackingMock.getMaxConcurrent()).toBe(1);
   });
 });
+
+// ===========================================================================
+// generate_book_dna_batch — cloud AI concurrency (Task #1)
+// DNA was always sequential even for cloud providers. With 3 books and
+// cloud_concurrency=3, all should run in parallel (maxConcurrent=3).
+// ===========================================================================
+
+describe('generate_book_dna_batch — cloud AI concurrency', () => {
+  function setCloudConfig(overrides = {}) {
+    saveLocalConfig({
+      use_claude_cli: false,
+      use_local_ai: false,
+      ollama_model: null,
+      openai_api_key: 'sk-test',
+      ai_model: 'gpt-5-nano',
+      cloud_concurrency: 5,
+      ...overrides,
+    });
+  }
+
+  it('runs in parallel for cloud AI (uses cloud_concurrency, not 1)', async () => {
+    setCloudConfig({ cloud_concurrency: 3 });
+    const trackingMock = makeConcurrencyTrackingMock(DNA_RESPONSE);
+    mockCallAI.mockImplementation(trackingMock);
+
+    const items = [1, 2, 3].map(i => ({ id: `b${i}`, title: `Book ${i}`, tags: [] }));
+    await callBackend('generate_book_dna_batch', { items });
+
+    // Cloud AI: up to 3 concurrent DNA calls expected
+    // Before fix: maxConcurrent = 1 (fully sequential)
+    expect(trackingMock.getMaxConcurrent()).toBeGreaterThan(1);
+  });
+
+  it('still runs sequentially for Ollama (concurrency=1)', async () => {
+    saveLocalConfig({
+      use_local_ai: true, ollama_model: 'qwen3:4b',
+      use_claude_cli: false, openai_api_key: null,
+      cloud_concurrency: 5,
+    });
+    const trackingMock = makeConcurrencyTrackingMock(DNA_RESPONSE);
+    mockCallAI.mockImplementation(trackingMock);
+
+    const items = [1, 2, 3].map(i => ({ id: `b${i}`, title: `Book ${i}`, tags: [] }));
+    await callBackend('generate_book_dna_batch', { items });
+
+    expect(trackingMock.getMaxConcurrent()).toBe(1);
+  });
+
+  it('still runs sequentially for Claude CLI (concurrency=1)', async () => {
+    setClaudeCliConfig();
+    const trackingMock = makeConcurrencyTrackingMock(DNA_RESPONSE);
+    mockCallAI.mockImplementation(trackingMock);
+
+    const items = [1, 2, 3].map(i => ({ id: `b${i}`, title: `Book ${i}`, tags: [] }));
+    await callBackend('generate_book_dna_batch', { items });
+
+    expect(trackingMock.getMaxConcurrent()).toBe(1);
+  });
+
+  it('returns correct results regardless of completion order', async () => {
+    setCloudConfig({ cloud_concurrency: 5 });
+    mockCallAI.mockResolvedValue(DNA_RESPONSE);
+
+    const items = [1, 2, 3, 4, 5].map(i => ({ id: `b${i}`, title: `Book ${i}`, tags: [] }));
+    const result = await callBackend('generate_book_dna_batch', { items });
+
+    expect(result.total_processed).toBe(5);
+    expect(result.total_failed).toBe(0);
+    // All items should have results (order preserved)
+    expect(result.results.map(r => r.id)).toEqual(['b1', 'b2', 'b3', 'b4', 'b5']);
+  });
+});

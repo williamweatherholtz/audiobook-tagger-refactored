@@ -1078,11 +1078,13 @@ Return JSON: {"year":"2005"}`;
     validateAIConfig(config);
     resetBatchCancel();
     const items = args.request?.items || args.items || [];
-    const results = [];
+    // Sequential for Ollama/Claude CLI (subprocess constraint), parallel for cloud APIs
+    const CONCURRENCY = isSequentialProvider(config) ? 1 : (config.cloud_concurrency || 5);
+    // Pre-allocate to preserve input order regardless of completion order
+    const results = new Array(items.length);
     let completed = 0;
 
-    for (const item of items) {
-      if (isBatchCancelled()) break;
+    const processItem = async (item, index) => {
       // Emit before the AI call so progress bar shows the book being processed
       // (Ollama can take 30-120s per book — without this the bar appears frozen)
       emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, processing: true });
@@ -1098,14 +1100,22 @@ Return JSON: {"year":"2005"}`;
 
         completed++;
         emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: true, error: null });
-        results.push({ id: item.id, success: true, dna_tags: dnaTags, merged_tags: mergedTags });
+        results[index] = { id: item.id, success: true, dna_tags: dnaTags, merged_tags: mergedTags };
       } catch (err) {
         completed++;
         emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: false, error: err.message });
-        results.push({ id: item.id, success: false, dna_tags: [], merged_tags: item.tags || [], error: err.message });
+        results[index] = { id: item.id, success: false, dna_tags: [], merged_tags: item.tags || [], error: err.message };
       }
+    };
+
+    for (let i = 0; i < items.length; i += CONCURRENCY) {
+      if (isBatchCancelled()) break;
+      const chunk = items.slice(i, i + CONCURRENCY);
+      await Promise.all(chunk.map((item, j) => processItem(item, i + j)));
     }
-    return { results, total_processed: results.filter(r => r.success).length, total_failed: results.filter(r => !r.success).length };
+
+    const finalResults = results.filter(Boolean);
+    return { results: finalResults, total_processed: finalResults.filter(r => r.success).length, total_failed: finalResults.filter(r => !r.success).length };
   },
 
   generate_book_dna: async (args) => {

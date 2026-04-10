@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { callBackend, subscribe, cancelCurrentBatch } from '../api';
 import { BookList } from '../components/scanner/BookList';
 import { MetadataPanel } from '../components/scanner/MetadataPanel';
@@ -19,6 +19,7 @@ import { BatchFixModal } from '../components/BatchFixModal';
 import { useToast } from '../components/Toast';
 import { useScan } from '../hooks/useScan';
 import { useFileSelection } from '../hooks/useFileSelection';
+import { useGroupSelection } from '../hooks/useGroupSelection';
 import { useTagOperations } from '../hooks/useTagOperations';
 import { useAbsCache } from '../hooks/useAbsCache';
 import { useBatchOperations } from '../hooks/useBatchOperations';
@@ -32,10 +33,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     applyBatchFixes, applyAuthorFixes, clearValidation,
     seriesAnalysis, analyzingSeries, runSeriesAnalysis, applySeriesFixes
   } = useApp();
-  const [selectedGroup, setSelectedGroup] = useState(null);
-  const [selectedGroupIds, setSelectedGroupIds] = useState(new Set());
-  const [expandedGroups, setExpandedGroups] = useState(new Set());
-
   // Consolidated modal and batch operation state
   const modals = useModals();
   const batch = useBatchOperations();
@@ -108,16 +105,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     cancelScan
   } = useScan();
 
-  // Keep selectedGroup in sync when groups are updated (e.g., after rescan)
-  useEffect(() => {
-    if (selectedGroup) {
-      const updatedGroup = groups.find(g => g.id === selectedGroup.id);
-      if (updatedGroup && updatedGroup !== selectedGroup) {
-        setSelectedGroup(updatedGroup);
-      }
-    }
-  }, [groups, selectedGroup]);
-
+  const fileSelection = useFileSelection();
   const {
     selectedFiles,
     setSelectedFiles,
@@ -134,7 +122,22 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     getSelectedCount,
     getSuccessCount,
     getFilesWithChanges
-  } = useFileSelection();
+  } = fileSelection;
+
+  const {
+    selectedGroup,
+    setSelectedGroup,
+    selectedGroupIds,
+    setSelectedGroupIds,
+    expandedGroups,
+    setExpandedGroups,
+    handleGroupClick,
+    handleSelectGroup,
+    handleSelectAll,
+    handleSelectFiltered,
+    handleClearSelection,
+    toggleGroup,
+  } = useGroupSelection({ groups, fileSelection });
 
   const {
     writing,
@@ -149,114 +152,6 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     refreshCache,
     cacheStatus,
   } = useAbsCache();
-
-  // FIXED: Prevent text selection on Shift+Click and properly handle range selection
-  // filteredGroups is passed from BookList when filters are applied
-  const handleGroupClick = (group, index, event, filteredGroups = null) => {
-    // Prevent text selection on modifier clicks
-    if (event.shiftKey || event.metaKey || event.ctrlKey) {
-      event.preventDefault();
-    }
-
-    setSelectedGroup(group);
-
-    // Cancel "all selected" mode when clicking individual groups
-    if (allSelected) {
-      setAllSelected(false);
-    }
-
-    // Use filteredGroups if provided (when filters are active), otherwise use full groups
-    const groupsToUse = filteredGroups || groups;
-
-    if (event.shiftKey && lastSelectedIndex !== null) {
-      // SHIFT+CLICK: Range selection from last selected to current
-      const start = Math.min(lastSelectedIndex, index);
-      const end = Math.max(lastSelectedIndex, index);
-
-      const newSelectedFiles = new Set(selectedFiles);
-      const newSelectedGroupIds = new Set(selectedGroupIds);
-
-      for (let i = start; i <= end; i++) {
-        const g = groupsToUse[i];
-        if (g) {
-          newSelectedGroupIds.add(g.id);
-          g.files.forEach(f => newSelectedFiles.add(f.id));
-        }
-      }
-
-      setSelectedFiles(newSelectedFiles);
-      setSelectedGroupIds(newSelectedGroupIds);
-    } else if (event.metaKey || event.ctrlKey) {
-      // CMD/CTRL+CLICK: Toggle this group in selection (add or remove)
-      const newSelectedFiles = new Set(selectedFiles);
-      const newSelectedGroupIds = new Set(selectedGroupIds);
-
-      if (newSelectedGroupIds.has(group.id)) {
-        // Already selected - remove it
-        newSelectedGroupIds.delete(group.id);
-        group.files.forEach(f => newSelectedFiles.delete(f.id));
-      } else {
-        // Not selected - add it
-        newSelectedGroupIds.add(group.id);
-        group.files.forEach(f => newSelectedFiles.add(f.id));
-      }
-
-      setSelectedFiles(newSelectedFiles);
-      setSelectedGroupIds(newSelectedGroupIds);
-    } else {
-      // REGULAR CLICK: Clear selection and select only this group
-      const newSelectedFiles = new Set();
-      const newSelectedGroupIds = new Set();
-
-      newSelectedGroupIds.add(group.id);
-      group.files.forEach(f => newSelectedFiles.add(f.id));
-
-      setSelectedFiles(newSelectedFiles);
-      setSelectedGroupIds(newSelectedGroupIds);
-    }
-
-    setLastSelectedIndex(index);
-  };
-
-  const handleSelectGroup = (group, checked) => {
-    selectAllInGroup(group, checked);
-    
-    setSelectedGroupIds(prev => {
-      const newSet = new Set(prev);
-      if (checked) {
-        newSet.add(group.id);
-      } else {
-        newSet.delete(group.id);
-      }
-      return newSet;
-    });
-  };
-
-  // Optimized: use allSelected flag instead of building huge Sets
-  const handleSelectAll = () => {
-    selectAll(groups);
-    setSelectedGroupIds(new Set()); // Clear - we use allSelected flag
-  };
-
-  // Select only the filtered groups (from search results)
-  const handleSelectFiltered = (filteredGroups) => {
-    if (!filteredGroups || filteredGroups.length === 0) return;
-
-    // If filtered groups equals all groups, use allSelected flag
-    if (filteredGroups.length === groups.length) {
-      selectAll(groups);
-      setSelectedGroupIds(new Set());
-    } else {
-      // Otherwise, select only the filtered group IDs
-      clearSelection();
-      setSelectedGroupIds(new Set(filteredGroups.map(g => g.id)));
-    }
-  };
-
-  const handleClearSelection = () => {
-    clearSelection();
-    setSelectedGroupIds(new Set());
-  };
 
   const handleEditMetadata = (group) => {
     modals.open('edit', { group });
@@ -2771,11 +2666,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           expandedGroups={expandedGroups}
           fileStatuses={fileStatuses}
           onGroupClick={setSelectedGroup}
-          onToggleGroup={(groupId) => {
-            const newExpanded = new Set(expandedGroups);
-            newExpanded.has(groupId) ? newExpanded.delete(groupId) : newExpanded.add(groupId);
-            setExpandedGroups(newExpanded);
-          }}
+          onToggleGroup={toggleGroup}
           onSelectGroup={handleSelectGroup}
           onSelectFile={handleGroupClick}
           onScan={handleScan}
