@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from './Toast';
+import { isTauri } from '../lib/platform.js';
 import { X, ArrowRight, ArrowLeft, Shield, Server, Key, Download, Check, Sparkles, AlertTriangle } from 'lucide-react';
 
 const ONBOARDING_KEY = 'audiobook_tagger_onboarding_completed';
@@ -186,7 +187,7 @@ export function SetupWizard({ onClose }) {
   const canAdvance = () => {
     switch (step) {
       case 0: return connectionStatus === 'success';
-      case 1: return !!(localConfig.openai_api_key || localConfig.anthropic_api_key);
+      case 1: return !!(localConfig.openai_api_key || localConfig.anthropic_api_key || localConfig.use_local_ai || localConfig.use_claude_cli);
       case 2: return true; // can skip import
       case 3: return true;
       default: return true;
@@ -291,8 +292,22 @@ export function SetupWizard({ onClose }) {
           {step === 1 && (
             <div className="space-y-3">
               <p className="text-sm text-gray-400 mb-3">
-                Enter an API key for OpenAI or Anthropic Claude. You only need one. Keys are stored in your browser only.
+                Enter an API key for OpenAI or Anthropic Claude, or use Claude CLI (no API key needed).
               </p>
+              {isTauri() && (
+                <label className="flex items-center gap-3 cursor-pointer py-2 px-3 rounded-lg border border-neutral-700 bg-neutral-800/50 hover:border-neutral-600 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={!!localConfig.use_claude_cli}
+                    onChange={(e) => setLocalConfig({ ...localConfig, use_claude_cli: e.target.checked, claude_cli_model: localConfig.claude_cli_model || 'sonnet' })}
+                    className="w-4 h-4 accent-purple-500"
+                  />
+                  <div>
+                    <span className="text-sm text-white font-medium">Use Claude CLI</span>
+                    <p className="text-xs text-gray-500">Enterprise/Pro subscription — no API key needed. Requires <code className="bg-neutral-700 px-1 rounded">claude auth login</code>.</p>
+                  </div>
+                </label>
+              )}
               <WizardInput
                 label="OpenAI API Key"
                 type="password"

@@ -491,12 +491,12 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     const selectedCount = getSelectedCount(groups, selectedGroupIds);
     if (selectedCount === 0 && !allSelected) return;
 
-    // Check if OpenAI key is configured
-    if (!config?.openai_api_key) {
-      // Fall back to static cleanup if no API key
+    // Use static (non-AI) cleanup when no AI provider is configured
+    const hasAnyAI = !!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai || config?.use_claude_cli);
+    if (!hasAnyAI) {
       try {
         const selectedGroups = allSelected ? groups : groups.filter(g => selectedGroupIds.has(g.id));
-        const result = await handleCleanupGenres(selectedGroups);
+        await handleCleanupGenres(selectedGroups);
       } catch (error) {
         console.error('Genre cleanup failed:', error);
       }
@@ -2646,7 +2646,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         generatingDna={generatingDna}
         refreshingCache={refreshingCache}
         hasAbsConnection={!!(config?.abs_base_url && config?.abs_api_token)}
-        hasOpenAiKey={!!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai)}
+        hasOpenAiKey={!!(config?.openai_api_key || config?.anthropic_api_key || config?.use_local_ai || config?.use_claude_cli)}
         useLocalAI={!!(config?.use_local_ai && config?.ollama_model)}
         aiModel={config?.ai_model}
         forceFresh={forceFresh}
