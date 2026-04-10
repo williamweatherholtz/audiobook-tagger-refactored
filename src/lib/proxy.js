@@ -77,12 +77,15 @@ export async function proxyFetch(targetUrl, options = {}, timeoutMs = 30000) {
  */
 export async function absApi(absBaseUrl, absToken, path, options = {}) {
   const { method = 'GET', body = null } = options;
-  const url = `${absBaseUrl.replace(/\/$/, '')}${path}`;
+  // Trim whitespace from URL and token — copy-paste from browsers/ABS UI
+  // commonly adds leading/trailing spaces that silently break the request.
+  const url = `${(absBaseUrl || '').trim().replace(/\/$/, '')}${path}`;
+  const token = (absToken || '').trim();
 
   const res = await proxyFetch(url, {
     method,
     headers: {
-      'Authorization': `Bearer ${absToken}`,
+      'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
     },
     body,
