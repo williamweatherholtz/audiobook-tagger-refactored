@@ -234,10 +234,12 @@ pub async fn ollama_stop() -> Result<String, String> {
 
 #[tauri::command]
 pub async fn ollama_install() -> Result<String, String> {
-    let dir = ollama_dir()?;
     // Windows: bundled install not supported — tell user to install manually
     #[cfg(target_os = "windows")]
     return Err("Windows: Please download Ollama from https://ollama.com/download and install manually.".to_string());
+
+    #[cfg(not(target_os = "windows"))]
+    let dir = ollama_dir()?;
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -334,11 +336,6 @@ fn install_from_bytes(bytes: &[u8], binary_path: &PathBuf) -> Result<(), String>
     Ok(())
 }
 
-#[cfg(target_os = "windows")]
-fn install_from_bytes(_bytes: &[u8], _binary_path: &PathBuf) -> Result<(), String> {
-    Err("Windows: Please download Ollama from https://ollama.com/download and install manually.".to_string())
-}
-
 #[tauri::command]
 pub async fn ollama_uninstall() -> Result<String, String> {
     let _ = ollama_stop().await;
@@ -372,7 +369,6 @@ pub async fn ollama_pull_model(app_handle: tauri::AppHandle, model_name: String)
     }
 
     // Stream the response line by line, emit progress events
-    use tokio::io::AsyncBufReadExt;
     let stream = resp.bytes_stream();
     use futures::StreamExt;
     let mut buffer = String::new();
