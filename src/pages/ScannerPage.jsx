@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { callBackend, subscribe } from '../api';
+import { callBackend, subscribe, cancelCurrentBatch } from '../api';
 import { BookList } from '../components/scanner/BookList';
 import { MetadataPanel } from '../components/scanner/MetadataPanel';
 import { ActionBar } from '../components/scanner/ActionBar';
@@ -1758,7 +1758,7 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
             });
           });
 
-          successCount += result.total_success;
+          successCount += result.total_processed;
           failedCount += result.total_failed;
         }
 
@@ -1881,9 +1881,11 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
     try {
       // Listen for progress events
       const unlisten = subscribe('dna-progress', (data) => {
-        const { current, total, id, title, success, error } = data;
-        if (success) dnaSuccessCount++;
-        else dnaFailedCount++;
+        const { current, total, id, title, success, error, processing } = data;
+        if (!processing) {
+          if (success) dnaSuccessCount++;
+          else dnaFailedCount++;
+        }
         batch.update('dna', {
           current,
           total,
@@ -2032,8 +2034,14 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
           // Genres
           if (r.genres?.length > 0) updatedMeta.genres = r.genres;
 
-          // Tags: merge classification tags + DNA tags + age tags (dedup)
+          // Tags: merge classification + DNA + age tags (dedup).
+          // If classify ran without DNA (dna_tags empty), preserve any existing dna:* tags
+          // so a prior DNA run isn't silently discarded.
+          const existingDnaTags = (r.dna_tags?.length > 0)
+            ? []
+            : (g.metadata?.tags || []).filter(t => t.startsWith('dna:'));
           const allTags = new Set([
+            ...existingDnaTags,
             ...(r.tags || []),
             ...(r.dna_tags || []),
             ...(r.age_tags || []),
@@ -2890,6 +2898,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="dna"
           progress={dnaProgress}
+          onCancel={() => {
+            cancelCurrentBatch();
+            batch.update('dna', { currentBook: 'Cancelling after current book...' });
+          }}
         />
       )}
 
@@ -2897,6 +2909,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="genres"
           progress={genreProgress}
+          onCancel={() => {
+            cancelCurrentBatch();
+            batch.update('genres', { currentBook: 'Cancelling after current book...' });
+          }}
         />
       )}
 
@@ -2904,6 +2920,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="metadata"
           progress={metadataProgress}
+          onCancel={() => {
+            cancelCurrentBatch();
+            batch.update('metadata', { currentBook: 'Cancelling after current book...' });
+          }}
         />
       )}
 
@@ -2911,6 +2931,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="classify"
           progress={classifyProgress}
+          onCancel={() => {
+            cancelCurrentBatch();
+            batch.update('classify', { currentBook: 'Cancelling after current book...' });
+          }}
         />
       )}
 
@@ -2918,6 +2942,10 @@ export function ScannerPage({ onNavigateToSettings, activeTab, navigateTo, logoS
         <ProgressBar
           type="descriptionProcessing"
           progress={descriptionProgress}
+          onCancel={() => {
+            cancelCurrentBatch();
+            batch.update('descriptionProcessing', { currentBook: 'Cancelling after current book...' });
+          }}
         />
       )}
 

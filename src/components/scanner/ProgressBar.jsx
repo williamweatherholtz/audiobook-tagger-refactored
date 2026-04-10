@@ -234,6 +234,15 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
                   ✗ {progress.failed} failed
                 </span>
               )}
+
+              {onCancel && (
+                <button
+                  onClick={onCancel}
+                  className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-700 text-sm font-medium rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
             </div>
 
             <div className="text-right">
@@ -834,6 +843,15 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
                   ✗ {progress.failed} failed
                 </span>
               )}
+
+              {onCancel && (
+                <button
+                  onClick={onCancel}
+                  className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-700 text-sm font-medium rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
+              )}
             </div>
 
             <div className="text-right">
@@ -895,6 +913,15 @@ export function ProgressBar({ type = 'scan', progress, onCancel, calculateETA })
               )}
               {progress.failed > 0 && (
                 <span className="text-red-400 text-sm">✗ {progress.failed} failed</span>
+              )}
+
+              {onCancel && (
+                <button
+                  onClick={onCancel}
+                  className="px-3 py-1.5 bg-red-100 hover:bg-red-200 text-red-700 text-sm font-medium rounded-lg transition-colors"
+                >
+                  Cancel
+                </button>
               )}
             </div>
 

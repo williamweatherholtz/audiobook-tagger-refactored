@@ -2,7 +2,7 @@ mod scanner;
 mod ollama;
 
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init())
         .invoke_handler(tauri::generate_handler![
@@ -24,6 +24,16 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Audiobook Tagger");
+        .build(tauri::generate_context!())
+        .expect("error while building Audiobook Tagger");
+
+    app.run(|_app_handle, event| {
+        // Also stop Ollama on clean app exit (complements on_window_event::Destroyed
+        // which handles window close but not app::exit() or process termination)
+        if let tauri::RunEvent::Exit = event {
+            if let Ok(rt) = tokio::runtime::Runtime::new() {
+                let _ = rt.block_on(ollama::ollama_stop());
+            }
+        }
+    });
 }

@@ -28,6 +28,20 @@ function getDnaSystemPrompt(config) {
   return isLocal ? BOOK_DNA_SYSTEM_PROMPT_COMPACT : BOOK_DNA_SYSTEM_PROMPT;
 }
 
+/** Throw early if the AI config is clearly misconfigured, before starting a batch. */
+function validateAIConfig(config) {
+  if (config.use_local_ai) {
+    if (!config.ollama_model) throw new Error('No Ollama model selected. Choose one in Settings > Local AI.');
+  } else {
+    const model = config.ai_model || 'gpt-5-nano';
+    if (model.startsWith('claude')) {
+      if (!config.anthropic_api_key) throw new Error('No Anthropic API key configured. Add one in Settings.');
+    } else {
+      if (!config.openai_api_key) throw new Error('No OpenAI API key configured. Add one in Settings.');
+    }
+  }
+}
+
 // ============================================================================
 // LOCAL CONFIG (browser localStorage)
 // ============================================================================
@@ -583,6 +597,8 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   // === GPT: Classification (genres + tags + age + DNA + themes/tropes) ===
   classify_books_batch: async (args) => {
     const config = getLocalConfig();
+    validateAIConfig(config);
+    resetBatchCancel();
     const books = args.books || [];
     const isLocal = !!(config.use_local_ai && config.ollama_model);
     const dnaEnabled = (args.dnaEnabled !== false) && !(isLocal && config.local_skip_dna);
@@ -627,6 +643,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       // LOCAL AI: Batch multiple books per prompt to reduce prompt eval overhead
       let completed = 0;
       for (let i = 0; i < books.length; i += BATCH_SIZE) {
+        if (isBatchCancelled()) break;
         const batch = books.slice(i, i + BATCH_SIZE);
         const batchNames = batch.map(b => b.title).join(', ');
 
@@ -668,6 +685,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           // Step 2: DNA for each book in batch (sequential)
           // Use positional matching — AI returns array in same order as input
           for (let j = 0; j < batch.length; j++) {
+            if (isBatchCancelled()) break;
             const book = batch[j];
             const parsed = parsedArray[j] || {};
             // Log if we got empty results for debugging
@@ -724,6 +742,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
       };
 
       for (let i = 0; i < books.length; i += CONCURRENCY) {
+        if (isBatchCancelled()) break;
         const chunk = books.slice(i, i + CONCURRENCY);
         results.push(...await Promise.all(chunk.map(processBook)));
       }
@@ -737,6 +756,8 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   // === GPT: Description Processing ===
   fix_descriptions_with_gpt: async (args) => {
     const config = getLocalConfig();
+    validateAIConfig(config);
+    resetBatchCancel();
     const books = args.books || [];
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
@@ -761,15 +782,20 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     };
 
     for (let i = 0; i < books.length; i += CONCURRENCY) {
+      if (isBatchCancelled()) break;
       const chunk = books.slice(i, i + CONCURRENCY);
       results.push(...await Promise.all(chunk.map(processBook)));
     }
-    return { results };
+    const total_processed = results.filter(r => r.success && r.fixed).length;
+    const total_failed = results.filter(r => !r.success).length;
+    return { results, total_processed, total_failed };
   },
 
   // === Description Processing (pipeline alias) ===
   process_descriptions_batch: async (args) => {
     const config = getLocalConfig();
+    validateAIConfig(config);
+    resetBatchCancel();
     const books = args.books || args.request?.books || [];
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const CONCURRENCY = isLocalAI ? 1 : (config.cloud_concurrency || 5);
@@ -794,6 +820,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     };
 
     for (let i = 0; i < books.length; i += CONCURRENCY) {
+      if (isBatchCancelled()) break;
       const chunk = books.slice(i, i + CONCURRENCY);
       results.push(...await Promise.all(chunk.map(processBook)));
     }
@@ -805,11 +832,14 @@ If it's part of a series, fill in the name and book number. If standalone, use n
   // === GPT: Genre Cleanup ===
   cleanup_genres_with_gpt: async (args) => {
     const config = getLocalConfig();
+    validateAIConfig(config);
+    resetBatchCancel();
     const books = args.books || [];
     const results = [];
     let completed = 0;
 
     for (const book of books) {
+      if (isBatchCancelled()) break;
       try {
         emitEvent('batch-progress', { call_type: 'genres', current: completed, total: books.length, title: `Classifying: ${book.title}` });
         const prompt = `Classify the genres for this audiobook. Return 1-3 genres from the APPROVED LIST ONLY.
@@ -843,12 +873,16 @@ Return JSON: {"genres":["Genre1","Genre2"]}`;
         results.push({ id: book.id, success: false, error: err.message });
       }
     }
-    return { results };
+    const total_processed = results.filter(r => r.success).length;
+    const total_failed = results.filter(r => !r.success).length;
+    return { results, total_processed, total_failed };
   },
 
   // === GPT: Tag Assignment (standard tags + DNA, matching desktop classify_book) ===
   assign_tags_with_gpt: async (args) => {
     const config = getLocalConfig();
+    validateAIConfig(config);
+    resetBatchCancel();
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const books = args.books || [];
     const dnaEnabled = args.dnaEnabled !== false; // default ON
@@ -856,6 +890,7 @@ Return JSON: {"genres":["Genre1","Genre2"]}`;
     let completed = 0;
 
     for (const book of books) {
+      if (isBatchCancelled()) break;
       try {
         emitEvent('batch-progress', { call_type: 'tags', current: completed, total: books.length, title: `Tagging: ${book.title}` });
         // Accept duration in seconds (book.duration) or minutes (book.duration_minutes)
@@ -907,9 +942,9 @@ Return ONLY valid JSON:
         results.push({ id: book.id, success: false, tags: [], suggested_tags: [], error: err.message });
       }
     }
-    const total_success = results.filter(r => r.success).length;
+    const total_processed = results.filter(r => r.success).length;
     const total_failed = results.filter(r => !r.success).length;
-    return { results, total_success, total_failed };
+    return { results, total_processed, total_failed };
   },
 
   // === GPT: Subtitle Fix ===
@@ -941,7 +976,9 @@ If the book has a well-known subtitle (e.g., "Dune: The Desert Planet"), include
         results.push({ id: book.id, success: false, error: err.message });
       }
     }
-    return { results };
+    const total_processed = results.filter(r => r.success).length;
+    const total_failed = results.filter(r => !r.success).length;
+    return { results, total_processed, total_failed };
   },
 
   // === GPT: Author Fix ===
@@ -1028,12 +1065,18 @@ Return JSON: {"year":"2005"}`;
   // === BookDNA Generation ===
   generate_book_dna_batch: async (args) => {
     const config = getLocalConfig();
+    validateAIConfig(config);
+    resetBatchCancel();
     const isLocalAI = !!(config.use_local_ai && config.ollama_model);
     const items = args.request?.items || args.items || [];
     const results = [];
     let completed = 0;
 
     for (const item of items) {
+      if (isBatchCancelled()) break;
+      // Emit before the AI call so progress bar shows the book being processed
+      // (Ollama can take 30-120s per book — without this the bar appears frozen)
+      emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, processing: true });
       try {
         const prompt = buildDnaPrompt(item);
         const response = await callAI(config, getDnaSystemPrompt(config), prompt, 1500);
@@ -1382,6 +1425,17 @@ function absItemToBookGroup(item, absBaseUrl) {
     })),
   };
 }
+
+// ============================================================================
+// BATCH CANCELLATION
+// ============================================================================
+
+let _batchCancelled = false;
+
+/** Signal the current batch to stop after the current book finishes. */
+export function cancelCurrentBatch() { _batchCancelled = true; }
+function resetBatchCancel() { _batchCancelled = false; }
+function isBatchCancelled() { return _batchCancelled; }
 
 // ============================================================================
 // EVENT SUBSCRIPTION (SSE — only needed if using Axum backend, otherwise no-op)
