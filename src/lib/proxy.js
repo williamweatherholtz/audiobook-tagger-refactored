@@ -3,6 +3,7 @@
 // This way it works both locally (direct) and on GitHub Pages (via proxy).
 
 import { isTauri, getTauriFetch } from './platform.js';
+import { logger } from './logger.js';
 
 const PROXY_URL = import.meta.env.VITE_PROXY_URL || 'https://audiobook-tagger-proxy.workers.dev';
 
@@ -216,9 +217,17 @@ export async function callAnthropic(apiKey, model, systemPrompt, userPrompt, max
   throw new Error('No text in Anthropic response');
 }
 
+// Module-level streaming callback.
+// api.js installs this before an Ollama batch call to receive per-token progress.
+// Cleared after each call so it doesn't leak to unrelated calls.
+let _ollamaStreamCb = null;
+export function setOllamaStreamCallback(fn) { _ollamaStreamCb = fn; }
+
 /**
  * Call local Ollama server for chat completions.
- * Uses Ollama's native /api/chat endpoint (not OpenAI-compat).
+ * Uses Ollama's native /api/chat endpoint with streaming for real-time UI feedback.
+ * Streams NDJSON from /api/chat, accumulating content and calling _ollamaStreamCb
+ * with {tokens, elapsed} after every chunk so the progress bar can tick.
  */
 export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b', maxTokens = 1000 } = {}) {
   const url = 'http://127.0.0.1:11434/api/chat';
@@ -229,7 +238,6 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
 
   const fetchFn = isTauri() ? await getTauriFetch() : globalThis.fetch.bind(globalThis);
 
-  // Build request body — adapt parameters for different model families
   const isQwen = model.startsWith('qwen');
   const body = {
     model,
@@ -237,19 +245,17 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt },
     ],
-    stream: false,
+    stream: true,   // ← streaming enabled for real-time token feedback
     format: 'json',
     options: {
       num_predict: maxTokens,
       temperature: 0.3,
     },
   };
-  // Qwen 3 models support 'think' parameter to disable extended reasoning
   if (isQwen) body.think = false;
 
-  // Use AbortController for timeout — larger models can take 2+ minutes on first load
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 minute timeout
+  const timeoutId = setTimeout(() => controller.abort(), 180000); // 3 min timeout
 
   let resp;
   try {
@@ -278,18 +284,80 @@ export async function callOllama(systemPrompt, userPrompt, { model = 'qwen3:4b',
     throw new Error(`Ollama error ${resp.status}: ${text}`);
   }
 
-  const data = await resp.json();
+  // ── Stream reading ──────────────────────────────────────────────────────
+  // Ollama streams NDJSON: one JSON object per line.
+  // Each chunk: {"message":{"content":"token"},"done":false}
+  // Final chunk: {"done":true,"eval_count":N,"eval_duration":N,...}
+  let content = '';
+  let tokenCount = 0;
+  let finalStats = null;
+
+  // Tauri's plugin-http and browser both expose response.body as a ReadableStream
+  if (resp.body) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // last entry may be incomplete — carry it forward
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          try {
+            const chunk = JSON.parse(trimmed);
+            if (chunk.message?.content) {
+              content += chunk.message.content;
+              tokenCount++;
+              // Notify at most every 10 tokens to avoid flooding the event loop
+              if (tokenCount % 10 === 0 && _ollamaStreamCb) {
+                _ollamaStreamCb({ tokens: tokenCount, elapsed: ((performance.now() - t0) / 1000).toFixed(1) });
+              }
+            }
+            if (chunk.done) {
+              finalStats = chunk;
+            }
+          } catch {
+            // Malformed chunk — skip
+          }
+        }
+      }
+      // Flush any remaining buffer content
+      if (buffer.trim()) {
+        try {
+          const chunk = JSON.parse(buffer.trim());
+          if (chunk.message?.content) content += chunk.message.content;
+          if (chunk.done) finalStats = chunk;
+        } catch {}
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  } else {
+    // Fallback: body not streamable (shouldn't happen, but be safe)
+    const data = await resp.json();
+    content = data?.message?.content || '';
+    finalStats = data;
+  }
+
   const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
-  const loadTime = data.load_duration ? (data.load_duration / 1e9).toFixed(1) : '?';
-  const evalTime = data.eval_duration ? (data.eval_duration / 1e9).toFixed(1) : '?';
-  const promptEvalTime = data.prompt_eval_duration ? (data.prompt_eval_duration / 1e9).toFixed(1) : '?';
-  const tokens = data.eval_count || '?';
-  const promptTokens = data.prompt_eval_count || '?';
-  const speed = (data.eval_count && data.eval_duration) ? (data.eval_count / (data.eval_duration / 1e9)).toFixed(0) : '?';
+  const loadTime = finalStats?.load_duration ? (finalStats.load_duration / 1e9).toFixed(1) : '?';
+  const evalTime = finalStats?.eval_duration ? (finalStats.eval_duration / 1e9).toFixed(1) : '?';
+  const promptEvalTime = finalStats?.prompt_eval_duration ? (finalStats.prompt_eval_duration / 1e9).toFixed(1) : '?';
+  const tokens = finalStats?.eval_count || tokenCount || '?';
+  const promptTokens = finalStats?.prompt_eval_count || '?';
+  const speed = (finalStats?.eval_count && finalStats?.eval_duration)
+    ? (finalStats.eval_count / (finalStats.eval_duration / 1e9)).toFixed(0)
+    : '?';
 
   console.log(`[Ollama] DONE in ${elapsed}s — load=${loadTime}s, prompt_eval=${promptEvalTime}s (${promptTokens} tokens), gen=${evalTime}s (${tokens} tokens, ${speed} tok/s)`);
 
-  const content = data?.message?.content;
   if (!content) throw new Error('Empty response from Ollama');
   return content.trim();
 }
@@ -306,8 +374,32 @@ export async function callClaudeCli(systemPrompt, userPrompt, model = 'sonnet') 
   if (!isTauri()) {
     throw new Error('Claude CLI is only available in the desktop app. Use an API key provider in the browser.');
   }
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke('call_claude_cli', { systemPrompt, userPrompt, model });
+
+  const promptKB = (userPrompt.length / 1024).toFixed(1);
+  const sysKB    = (systemPrompt.length / 1024).toFixed(1);
+  logger.info('ClaudeCLI', `→ model=${model}  user=${promptKB}KB  sys=${sysKB}KB`, {
+    model,
+    user_prompt_preview: userPrompt.substring(0, 300),
+    system_prompt_preview: systemPrompt.substring(0, 200),
+  });
+
+  const t0 = performance.now();
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const result = await invoke('call_claude_cli', { systemPrompt, userPrompt, model });
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    logger.info('ClaudeCLI', `← ${elapsed}s  response=${result.length} chars`, {
+      response_preview: result.substring(0, 500),
+    });
+    return result;
+  } catch (err) {
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    logger.error('ClaudeCLI', `✗ FAILED after ${elapsed}s: ${err}`, {
+      error: String(err),
+      user_prompt_preview: userPrompt.substring(0, 300),
+    });
+    throw err;
+  }
 }
 
 /**
@@ -321,6 +413,14 @@ export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000)
   // Claude CLI (Enterprise subscription — no API key needed)
   if (config.use_claude_cli) {
     return callClaudeCli(systemPrompt, userPrompt, config.claude_cli_model || 'sonnet');
+  }
+
+  // Log non-CLI providers too (less verbose — just the routing decision)
+  if (config.use_local_ai && config.ollama_model) {
+    logger.debug('AI', `→ Ollama  model=${config.ollama_model}  maxTokens=${maxTokens}`);
+  } else {
+    const model = config.ai_model || 'gpt-4o-mini';
+    logger.debug('AI', `→ Cloud  model=${model}  maxTokens=${maxTokens}`);
   }
 
   // Local AI (Ollama)
@@ -347,7 +447,8 @@ export async function callAI(config, systemPrompt, userPrompt, maxTokens = 2000)
 }
 
 /**
- * Parse a JSON response from AI, handling markdown code blocks.
+ * Parse a JSON response from AI, handling markdown code blocks and preamble text.
+ * Claude CLI (and some models) may prefix the JSON with prose like "Here is the JSON:".
  */
 export function parseAIJson(text) {
   const cleaned = text
@@ -358,7 +459,34 @@ export function parseAIJson(text) {
 
   try {
     return JSON.parse(cleaned);
-  } catch (e) {
-    throw new Error(`Failed to parse AI response as JSON: ${e.message}\nResponse was: ${cleaned.substring(0, 200)}`);
+  } catch (firstErr) {
+    // Fallback: find the first JSON object or array in the text.
+    // Handles cases where the AI includes preamble prose before the JSON.
+    const objMatch = cleaned.match(/\{[\s\S]*\}/);
+    const arrMatch = cleaned.match(/\[[\s\S]*\]/);
+    if (objMatch) {
+      try {
+        const parsed = JSON.parse(objMatch[0]);
+        logger.warn('ParseAIJson', 'Direct parse failed; extracted JSON object from preamble text', {
+          raw_preview: cleaned.substring(0, 200),
+        });
+        return parsed;
+      } catch (_) { /* try array next */ }
+    }
+    if (arrMatch) {
+      try {
+        const parsed = JSON.parse(arrMatch[0]);
+        logger.warn('ParseAIJson', 'Direct parse failed; extracted JSON array from preamble text', {
+          raw_preview: cleaned.substring(0, 200),
+        });
+        return parsed;
+      } catch (_) { /* fall through */ }
+    }
+    logger.error('ParseAIJson', `Failed to parse AI response as JSON: ${firstErr.message}`, {
+      raw_response: cleaned.substring(0, 500),
+    });
+    throw new Error(
+      `Failed to parse AI response as JSON: ${firstErr.message}\nResponse was: ${cleaned.substring(0, 200)}`
+    );
   }
 }

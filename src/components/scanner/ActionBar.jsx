@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react';
-import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, X, Zap, RefreshCw, AlertTriangle, User, Search, Wrench, BookOpen, Users, Hash, Dna, ChevronDown, MoreHorizontal, Calendar, Settings } from 'lucide-react';
+import { Download, Upload, Tag, CheckCircle, Sparkles, FileText, Type, Library, X, Zap, RefreshCw, AlertTriangle, User, Search, Wrench, BookOpen, Users, Hash, Dna, ChevronDown, MoreHorizontal, Calendar, Settings, Mic, Tags } from 'lucide-react';
 
 // Per-book cost estimate (input ~2000 tokens, output ~1000 tokens)
 const MODEL_PRICES = {
@@ -61,6 +61,10 @@ export function ActionBar({
   onLookupISBN,
   onRunAll,
   onGenerateDna,
+  onReadFileTags,
+  onTranscribeAudio,
+  readingFileTags = false,
+  transcribing = false,
   onClassifyAll,
   classifying = false,
   onMetadataResolution,
@@ -111,7 +115,7 @@ export function ActionBar({
   const selectedCount = allSelected ? totalGroupCount : selectedGroupCount;
   const hasSelection = selectedCount > 0;
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries;
+  const isProcessing = scanning || cleaningGenres || assigningTags || fixingDescriptions || fixingTitles || fixingAuthors || fixingYears || fixingSeries || lookingUpAge || lookingUpISBN || runningAll || generatingDna || classifying || resolvingMetadata || processingDescriptions || pushing || validating || analyzingSeries || readingFileTags || transcribing;
 
   // Time estimate for local AI: ~3s per book (batched 5 per prompt) + ~4s DNA per book
   const estimateLocalTime = (count, calls) => {
@@ -379,6 +383,18 @@ export function ActionBar({
                           </MenuItem>
                         </>
                       )}
+
+                      {/* File-level enrichment (no AI key required — reads local files) */}
+                      <div className="h-px bg-neutral-800 my-1" />
+                      <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-gray-600 font-semibold">
+                        File Analysis
+                      </div>
+                      <MenuItem onClick={onReadFileTags} disabled={!hasSelection} active={readingFileTags} icon={Tags}>
+                        Read Embedded Tags
+                      </MenuItem>
+                      <MenuItem onClick={onTranscribeAudio} disabled={!hasSelection} active={transcribing} icon={Mic}>
+                        Transcribe Audio
+                      </MenuItem>
                     </>
                   )}
                   {!hasOpenAiKey && (

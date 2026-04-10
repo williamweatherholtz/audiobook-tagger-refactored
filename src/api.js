@@ -3,8 +3,9 @@
 // All API calls go through the Cloudflare Worker CORS proxy.
 // Config lives in browser localStorage.
 
-import { absApi, callAI, parseAIJson, proxyFetch } from './lib/proxy';
-import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
+import { absApi, callAI, parseAIJson, proxyFetch, setOllamaStreamCallback } from './lib/proxy';
+import { logger } from './lib/logger.js';
+import { buildMetadataPrompt, buildClassificationPrompt, buildBatchClassificationPrompt, buildBatchMetadataPrompt, buildDescriptionPrompt, buildDnaPrompt, buildBatchDnaPrompt, BOOK_DNA_SYSTEM_PROMPT, BOOK_DNA_SYSTEM_PROMPT_COMPACT, SYSTEM_PROMPT, DEFAULT_TAG_INSTRUCTIONS } from './lib/prompts';
 import { toTitleCase, removeJunkSuffixes, cleanAuthorName, cleanNarratorName } from './lib/normalize';
 import { APPROVED_GENRES, APPROVED_TAGS, GENRE_ALIASES, mapGenre, enforceGenrePolicyWithSplit, enforceTagPolicyWithDna } from './lib/genres';
 import { isTauri } from './lib/platform.js';
@@ -129,6 +130,9 @@ const TAURI_COMMANDS = new Set([
   'ollama_uninstall',
   'ollama_pull_model',
   'ollama_delete_model',
+  'read_book_tags',
+  'detect_transcription_tools',
+  'transcribe_book',
 ]);
 
 // ============================================================================
@@ -619,6 +623,14 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     const BATCH_SIZE = isOllama ? 3 : 1; // Ollama: batch 3 books per prompt (small models struggle with 5+)
     const results = [];
 
+    logger.info('Classify', `Starting batch: ${books.length} books`, {
+      provider: config.use_claude_cli ? 'claude-cli' : config.use_local_ai ? 'ollama' : 'cloud',
+      model: config.use_claude_cli ? (config.claude_cli_model || 'sonnet') : config.ollama_model || config.ai_model,
+      concurrency: CONCURRENCY,
+      dnaEnabled,
+      isOllama,
+    });
+
     // Helper: parse age_rating into tags
     const parseAgeTags = (ageRating) => {
       const age_tags = [];
@@ -655,10 +667,16 @@ If it's part of a series, fill in the name and book number. If standalone, use n
     if (isOllama) {
       // LOCAL AI: Batch multiple books per prompt to reduce prompt eval overhead
       let completed = 0;
+      // Track which batch is currently generating so stream tokens show the right label
+      let _streamLabel = '';
+      setOllamaStreamCallback(({ tokens, elapsed }) => {
+        emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: `${_streamLabel} (${tokens} tokens, ${elapsed}s)` });
+      });
       for (let i = 0; i < books.length; i += BATCH_SIZE) {
         if (isBatchCancelled()) break;
         const batch = books.slice(i, i + BATCH_SIZE);
         const batchNames = batch.map(b => b.title).join(', ');
+        _streamLabel = batchNames;
 
         try {
           // Step 1: Batched classification
@@ -695,32 +713,57 @@ If it's part of a series, fill in the name and book number. If standalone, use n
             continue;
           }
 
-          // Step 2: DNA for each book in batch (sequential)
-          // Use positional matching — AI returns array in same order as input
+          // Step 2: Batched DNA for all books in this chunk (single AI call)
+          // This replaces the old per-book sequential DNA loop — 1 call instead of N.
+          let batchDnaTags = batch.map(() => []);
+          if (dnaEnabled) {
+            const batchNames = batch.map(b => b.title).join(', ');
+            emitEvent('batch-progress', { call_type: 'classify', current: completed + 0.5, total: books.length, title: `DNA: ${batchNames}` });
+            try {
+              // Enrich books with freshly-classified genres/tags so DNA prompt is accurate
+              const booksForDna = batch.map((b, j) => ({
+                ...b,
+                genres: parsedArray[j]?.genres || b.genres || [],
+                tags: parsedArray[j]?.tags || b.tags || [],
+              }));
+              const batchDnaPrompt = buildBatchDnaPrompt(booksForDna);
+              const dnaResp = await callAI(config, getDnaSystemPrompt(config), batchDnaPrompt, BATCH_SIZE * 500);
+              let dnaArray = parseAIJson(dnaResp);
+              if (!Array.isArray(dnaArray)) {
+                const wrapped = dnaArray.books || dnaArray.results || dnaArray.dna || dnaArray.data;
+                dnaArray = Array.isArray(wrapped) ? wrapped : [dnaArray];
+              }
+              batchDnaTags = dnaArray.map(d => { try { return convertDnaToTags(d); } catch { return []; } });
+            } catch (dnaErr) {
+              logger.warn('Classify', `Batched DNA failed, falling back to individual: ${dnaErr.message}`);
+              // Fall back to individual DNA calls
+              for (let j = 0; j < batch.length; j++) {
+                try {
+                  const dnaResp = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(batch[j]), 1500);
+                  batchDnaTags[j] = convertDnaToTags(parseAIJson(dnaResp));
+                } catch {}
+              }
+            }
+          }
+
+          // Step 3: Merge classification + DNA results
           for (let j = 0; j < batch.length; j++) {
             if (isBatchCancelled()) break;
             const book = batch[j];
             const parsed = parsedArray[j] || {};
-            // Log if we got empty results for debugging
             if (!parsed.genres?.length && !parsed.tags?.length) {
-              console.warn(`[Batch] Empty result for book ${j} "${book.title}" — parsedArray has ${parsedArray.length} items`);
+              logger.warn('Classify', `Empty result for "${book.title}" — parsedArray has ${parsedArray.length} items`);
             }
-            let dna_tags = [];
-
-            if (dnaEnabled) {
-              emitEvent('batch-progress', { call_type: 'classify', current: completed + 0.5, total: books.length, title: `DNA: ${book.title}` });
-              try {
-                const dnaResp = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500);
-                dna_tags = convertDnaToTags(parseAIJson(dnaResp));
-              } catch {}
-            }
-
-            results.push(buildResult(book, parsed, dna_tags));
+            results.push(buildResult(book, parsed, batchDnaTags[j] || []));
             completed++;
             emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
           }
         } catch (err) {
           // Entire batch failed
+          logger.error('Classify', `Ollama batch failed: ${err.message}`, {
+            batch_titles: batch.map(b => b.title),
+            error: err.message,
+          });
           for (const book of batch) {
             results.push({ id: book.id, success: false, error: err.message });
             completed++;
@@ -728,19 +771,35 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: 'Error' });
         }
       }
+      setOllamaStreamCallback(null); // clear after Ollama path finishes
     } else {
       // CLOUD AI: Process books individually with high concurrency (parallel)
+      // Sequential providers (Claude CLI, Ollama) use CONCURRENCY=1 AND sequential
+      // classify→DNA per book to avoid spawning two processes simultaneously.
+      const isSeq = isSequentialProvider(config);
       let completed = 0;
       const processBook = async (book) => {
         try {
           emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: `Classifying: ${book.title}` });
-          const [response, dnaResponse] = await Promise.all([
-            callAI(config, getSystemPrompt(config),
-              buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000),
-            dnaEnabled
-              ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
-              : Promise.resolve(null),
-          ]);
+          let response, dnaResponse;
+          if (isSeq) {
+            // Sequential: classify first, then DNA (avoids two concurrent subprocesses)
+            response = await callAI(config, getSystemPrompt(config),
+              buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000);
+            if (dnaEnabled) {
+              emitEvent('batch-progress', { call_type: 'classify', current: completed + 0.5, total: books.length, title: `DNA: ${book.title}` });
+              dnaResponse = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null);
+            }
+          } else {
+            // Parallel: fire classify + DNA simultaneously for cloud providers
+            [response, dnaResponse] = await Promise.all([
+              callAI(config, getSystemPrompt(config),
+                buildClassificationPrompt(book, null, config.custom_classification_rules || null), 2000),
+              dnaEnabled
+                ? callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(book), 1500).catch(() => null)
+                : Promise.resolve(null),
+            ]);
+          }
           const parsed = parseAIJson(response);
           let dna_tags = [];
           if (dnaResponse) { try { dna_tags = convertDnaToTags(parseAIJson(dnaResponse)); } catch {} }
@@ -749,6 +808,11 @@ If it's part of a series, fill in the name and book number. If standalone, use n
           return buildResult(book, parsed, dna_tags);
         } catch (err) {
           completed++;
+          logger.error('Classify', `✗ "${book.title}" — ${err.message}`, {
+            book_title: book.title,
+            book_author: book.author,
+            error: err.message,
+          });
           emitEvent('batch-progress', { call_type: 'classify', current: completed, total: books.length, title: book.title });
           return { id: book.id, success: false, error: err.message };
         }
@@ -763,6 +827,7 @@ If it's part of a series, fill in the name and book number. If standalone, use n
 
     const total_processed = results.filter(r => r.success).length;
     const total_failed = results.filter(r => !r.success).length;
+    logger.info('Classify', `Batch complete: ${total_processed} ok, ${total_failed} failed`);
     return { results, total_processed, total_failed };
   },
 
@@ -1078,40 +1143,93 @@ Return JSON: {"year":"2005"}`;
     validateAIConfig(config);
     resetBatchCancel();
     const items = args.request?.items || args.items || [];
+    const isOllama = !!(config.use_local_ai && config.ollama_model);
     // Sequential for Ollama/Claude CLI (subprocess constraint), parallel for cloud APIs
     const CONCURRENCY = isSequentialProvider(config) ? 1 : (config.cloud_concurrency || 5);
-    // Pre-allocate to preserve input order regardless of completion order
+    const BATCH_SIZE = isOllama ? 3 : 1; // Batch 3 per prompt for Ollama
     const results = new Array(items.length);
     let completed = 0;
 
-    const processItem = async (item, index) => {
-      // Emit before the AI call so progress bar shows the book being processed
-      // (Ollama can take 30-120s per book — without this the bar appears frozen)
-      emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, processing: true });
-      try {
-        const prompt = buildDnaPrompt(item);
-        const response = await callAI(config, getDnaSystemPrompt(config), prompt, 1500);
-        const parsed = parseAIJson(response);
-        const dnaTags = convertDnaToTags(parsed);
+    if (isOllama && items.length > 1) {
+      // LOCAL AI: batch multiple books per DNA call (reduces prompt eval overhead ~3x)
+      let _streamLabel = '';
+      setOllamaStreamCallback(({ tokens, elapsed }) => {
+        emitEvent('dna-progress', { current: completed, total: items.length, id: '', title: `${_streamLabel} (${tokens} tokens, ${elapsed}s)`, processing: true });
+      });
+      for (let i = 0; i < items.length; i += BATCH_SIZE) {
+        if (isBatchCancelled()) break;
+        const batch = items.slice(i, i + BATCH_SIZE);
+        const batchNames = batch.map(b => b.title).join(', ');
+        _streamLabel = `DNA: ${batchNames}`;
+        emitEvent('dna-progress', { current: completed, total: items.length, id: batch[0].id, title: `DNA: ${batchNames}`, processing: true });
 
-        // Merge with existing tags (preserve non-DNA tags, replace DNA ones)
-        const existingNonDna = (item.tags || []).filter(t => !t.startsWith('dna:'));
-        const mergedTags = [...existingNonDna, ...dnaTags];
+        try {
+          const batchPrompt = buildBatchDnaPrompt(batch);
+          const response = await callAI(config, getDnaSystemPrompt(config), batchPrompt, BATCH_SIZE * 500);
+          let dnaArray = parseAIJson(response);
+          if (!Array.isArray(dnaArray)) {
+            const wrapped = dnaArray.books || dnaArray.results || dnaArray.dna || dnaArray.data;
+            dnaArray = Array.isArray(wrapped) ? wrapped : [dnaArray];
+          }
 
-        completed++;
-        emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: true, error: null });
-        results[index] = { id: item.id, success: true, dna_tags: dnaTags, merged_tags: mergedTags };
-      } catch (err) {
-        completed++;
-        emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: false, error: err.message });
-        results[index] = { id: item.id, success: false, dna_tags: [], merged_tags: item.tags || [], error: err.message };
+          for (let j = 0; j < batch.length; j++) {
+            const item = batch[j];
+            try {
+              const dnaTags = convertDnaToTags(dnaArray[j] || {});
+              const existingNonDna = (item.tags || []).filter(t => !t.startsWith('dna:'));
+              completed++;
+              emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: true, error: null });
+              results[i + j] = { id: item.id, success: true, dna_tags: dnaTags, merged_tags: [...existingNonDna, ...dnaTags] };
+            } catch (parseErr) {
+              completed++;
+              emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: false, error: parseErr.message });
+              results[i + j] = { id: item.id, success: false, dna_tags: [], merged_tags: item.tags || [], error: parseErr.message };
+            }
+          }
+        } catch (batchErr) {
+          logger.warn('DNA', `Batched DNA failed, falling back to individual: ${batchErr.message}`);
+          // Fall back to individual calls for this batch
+          for (let j = 0; j < batch.length; j++) {
+            const item = batch[j];
+            try {
+              const response = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(item), 1500);
+              const dnaTags = convertDnaToTags(parseAIJson(response));
+              const existingNonDna = (item.tags || []).filter(t => !t.startsWith('dna:'));
+              completed++;
+              results[i + j] = { id: item.id, success: true, dna_tags: dnaTags, merged_tags: [...existingNonDna, ...dnaTags] };
+            } catch (err) {
+              completed++;
+              results[i + j] = { id: item.id, success: false, dna_tags: [], merged_tags: item.tags || [], error: err.message };
+            }
+            emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: !results[i + j]?.error });
+          }
+        }
       }
-    };
+      setOllamaStreamCallback(null); // clear after Ollama DNA path finishes
+    } else {
+      // CLOUD AI (or single book): individual with concurrency
+      const processItem = async (item, index) => {
+        emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, processing: true });
+        try {
+          const response = await callAI(config, getDnaSystemPrompt(config), buildDnaPrompt(item), 1500);
+          const dnaTags = convertDnaToTags(parseAIJson(response));
+          const existingNonDna = (item.tags || []).filter(t => !t.startsWith('dna:'));
+          const mergedTags = [...existingNonDna, ...dnaTags];
+          completed++;
+          emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: true, error: null });
+          results[index] = { id: item.id, success: true, dna_tags: dnaTags, merged_tags: mergedTags };
+        } catch (err) {
+          completed++;
+          emitEvent('dna-progress', { current: completed, total: items.length, id: item.id, title: item.title || item.id, success: false, error: err.message });
+          results[index] = { id: item.id, success: false, dna_tags: [], merged_tags: item.tags || [], error: err.message };
+        }
+      };
 
-    for (let i = 0; i < items.length; i += CONCURRENCY) {
-      if (isBatchCancelled()) break;
-      const chunk = items.slice(i, i + CONCURRENCY);
-      await Promise.all(chunk.map((item, j) => processItem(item, i + j)));
+      for (let i = 0; i < items.length; i += CONCURRENCY) {
+        if (isBatchCancelled()) break;
+        const chunk = items.slice(i, i + CONCURRENCY);
+        await Promise.all(chunk.map((item, j) => processItem(item, i + j)));
+      }
     }
 
     const finalResults = results.filter(Boolean);
@@ -1386,6 +1504,11 @@ Return JSON: {"year":"2005"}`;
   ollama_get_status: () => ({ installed: false, running: false, models: [] }),
   ollama_get_model_presets: () => [],
   ollama_get_disk_usage: () => 0,
+
+  // === File Tags & Transcription (Tauri-only; stubs for web version) ===
+  read_book_tags: () => { throw new Error('read_book_tags requires the desktop app'); },
+  detect_transcription_tools: () => ({ ffmpeg: null, whisper: null, whisper_mode: null }),
+  transcribe_book: () => { throw new Error('transcribe_book requires the desktop app'); },
 };
 
 // ============================================================================

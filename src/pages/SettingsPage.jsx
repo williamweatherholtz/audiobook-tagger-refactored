@@ -10,7 +10,7 @@ import {
   BOOK_DNA_SYSTEM_PROMPT as DEFAULT_DNA_PROMPT,
 } from '../lib/prompts';
 import { APPROVED_GENRES } from '../lib/genres';
-import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles, Cpu, Download, HardDrive } from 'lucide-react';
+import { ChevronDown, Check, X, Plus, Trash2, AlertCircle, Library, Settings, Sparkles, Cpu, Download, HardDrive, Mic } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../components/Toast';
 import { ConfirmModal } from '../components/ConfirmModal';
@@ -818,6 +818,113 @@ export function SettingsPage({ activeTab, navigateTo, logoSvg, onOpenWizard }) {
                     </div>
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* ── Transcription ────────────────────────────────────────────── */}
+            {isTauri() && (
+              <div className="bg-neutral-900/50 rounded-xl p-6 space-y-4">
+                <div className="flex items-center gap-2 mb-1">
+                  <Mic className="w-4 h-4 text-emerald-400" />
+                  <h3 className="text-lg font-semibold text-white">Transcription</h3>
+                </div>
+                <p className="text-sm text-gray-400">
+                  Transcribe the first and last 90 seconds of each audiobook using Whisper. The transcript
+                  is included as context for AI metadata resolution and classification — it's the most
+                  reliable source of what's actually in the recording.
+                </p>
+
+                <div className="space-y-3">
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1.5">Whisper Mode</label>
+                    <select
+                      value={localConfig.whisper_mode || 'auto'}
+                      onChange={(e) => setLocalConfig({ ...localConfig, whisper_mode: e.target.value })}
+                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                    >
+                      <option value="auto">Auto-detect (try openai-whisper, then whisper.cpp)</option>
+                      <option value="openai">openai-whisper (pip install openai-whisper)</option>
+                      <option value="cpp">whisper.cpp (faster, no Python, needs model file)</option>
+                    </select>
+                  </div>
+
+                  <Input
+                    label="Whisper binary path (leave blank to auto-detect from PATH)"
+                    value={localConfig.whisper_path}
+                    onChange={(v) => setLocalConfig({ ...localConfig, whisper_path: v })}
+                    placeholder="e.g. C:\Python312\Scripts\whisper.exe"
+                  />
+
+                  {(localConfig.whisper_mode === 'openai' || !localConfig.whisper_mode || localConfig.whisper_mode === 'auto') && (
+                    <div>
+                      <label className="block text-sm text-gray-400 mb-1.5">Model (openai-whisper)</label>
+                      <select
+                        value={localConfig.whisper_model_name || 'large-v3'}
+                        onChange={(e) => setLocalConfig({ ...localConfig, whisper_model_name: e.target.value })}
+                        className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                      >
+                        <option value="tiny">tiny — fastest, least accurate</option>
+                        <option value="base">base</option>
+                        <option value="small">small</option>
+                        <option value="medium">medium</option>
+                        <option value="large">large</option>
+                        <option value="large-v2">large-v2</option>
+                        <option value="large-v3">large-v3 — best accuracy (recommended)</option>
+                        <option value="turbo">turbo — fast, near large-v2 quality</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {localConfig.whisper_mode === 'cpp' && (
+                    <Input
+                      label="whisper.cpp model file path (ggml-*.bin)"
+                      value={localConfig.whisper_model_path}
+                      onChange={(v) => setLocalConfig({ ...localConfig, whisper_model_path: v })}
+                      placeholder="e.g. C:\whisper.cpp\models\ggml-large-v3.bin"
+                    />
+                  )}
+
+                  <div>
+                    <label className="block text-sm text-gray-400 mb-1.5">Language</label>
+                    <select
+                      value={localConfig.whisper_language || 'en'}
+                      onChange={(e) => setLocalConfig({ ...localConfig, whisper_language: e.target.value })}
+                      className="w-full px-3 py-2 bg-neutral-800 border border-neutral-700 rounded-lg text-sm text-white focus:outline-none cursor-pointer"
+                    >
+                      <option value="auto">Auto-detect</option>
+                      <option value="en">English</option>
+                      <option value="es">Spanish</option>
+                      <option value="fr">French</option>
+                      <option value="de">German</option>
+                      <option value="ja">Japanese</option>
+                      <option value="zh">Chinese</option>
+                      <option value="pt">Portuguese</option>
+                      <option value="it">Italian</option>
+                    </select>
+                  </div>
+
+                  <Input
+                    label="Segment length (seconds, default 90)"
+                    type="number"
+                    value={localConfig.whisper_segment_secs}
+                    onChange={(v) => setLocalConfig({ ...localConfig, whisper_segment_secs: parseInt(v) || 90 })}
+                    placeholder="90"
+                  />
+
+                  <Input
+                    label="ffmpeg binary path (leave blank to auto-detect)"
+                    value={localConfig.ffmpeg_path}
+                    onChange={(v) => setLocalConfig({ ...localConfig, ffmpeg_path: v })}
+                    placeholder="e.g. C:\ffmpeg\bin\ffmpeg.exe"
+                  />
+
+                  <div className="text-xs text-gray-500 space-y-1 pt-1 border-t border-neutral-800">
+                    <p className="font-medium text-gray-400">Setup instructions:</p>
+                    <p><span className="text-gray-300">openai-whisper:</span> <code className="bg-neutral-800 px-1 rounded">pip install openai-whisper</code></p>
+                    <p><span className="text-gray-300">whisper.cpp:</span> download a prebuilt release from <span className="text-blue-400">github.com/ggerganov/whisper.cpp/releases</span>, then download a model with <code className="bg-neutral-800 px-1 rounded">./models/download-ggml-model.sh large-v3</code></p>
+                    <p><span className="text-gray-300">ffmpeg:</span> download from <span className="text-blue-400">ffmpeg.org</span> or install via <code className="bg-neutral-800 px-1 rounded">winget install ffmpeg</code> / <code className="bg-neutral-800 px-1 rounded">brew install ffmpeg</code></p>
+                  </div>
+                </div>
               </div>
             )}
 

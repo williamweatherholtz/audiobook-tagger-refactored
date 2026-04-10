@@ -165,6 +165,35 @@ export function buildMetadataPrompt(input) {
     }
   }
 
+  // Embedded file tags (from ID3/MP4/Vorbis tags read directly from the audio files)
+  if (input.file_tags?.length > 0) {
+    context += '\n--- Embedded File Tags (read from audio files — HIGH RELIABILITY) ---\n';
+    for (const ft of input.file_tags) {
+      context += `File: ${safe(ft.filename)}\n`;
+      if (ft.title) context += `  Tag title: ${safe(ft.title)}\n`;
+      if (ft.artist) context += `  Tag artist: ${safe(ft.artist)}\n`;
+      if (ft.album) context += `  Tag album: ${safe(ft.album)}\n`;
+      if (ft.album_artist) context += `  Tag album artist: ${safe(ft.album_artist)}\n`;
+      if (ft.narrator) context += `  Tag narrator: ${safe(ft.narrator)}\n`;
+      if (ft.composer) context += `  Tag composer: ${safe(ft.composer)}\n`;
+      if (ft.year) context += `  Tag year: ${ft.year}\n`;
+      if (ft.publisher) context += `  Tag publisher: ${safe(ft.publisher)}\n`;
+      if (ft.description) context += `  Tag description: ${safe(ft.description.substring(0, 400))}\n`;
+      if (ft.comment) context += `  Tag comment: ${safe(ft.comment.substring(0, 300))}\n`;
+    }
+  }
+
+  // Audio transcripts (first/last 90 seconds — ground truth from the recording itself)
+  if (input.transcripts) {
+    context += '\n--- Audio Transcripts (actual recording — HIGHEST RELIABILITY) ---\n';
+    if (input.transcripts.beginning) {
+      context += `Beginning of recording:\n${input.transcripts.beginning.substring(0, 800)}\n`;
+    }
+    if (input.transcripts.ending) {
+      context += `End of recording:\n${input.transcripts.ending.substring(0, 800)}\n`;
+    }
+  }
+
   return `Resolve ALL metadata for this audiobook in ONE pass. Determine the correct title, subtitle, author, series, and sequence.
 
 ${context}
@@ -236,6 +265,15 @@ export function buildClassificationPrompt(book, externalData = null, customInstr
     }
     if (externalData.description && !book.description) {
       context += `\nDescription from providers: ${safe(externalData.description.substring(0, 500))}`;
+    }
+  }
+
+  if (book.file_enrichment?.transcripts) {
+    const { beginning, ending } = book.file_enrichment.transcripts;
+    if (beginning || ending) {
+      context += `\n\n--- Audio Transcripts (actual recording — use for tone, content level, age signals) ---`;
+      if (beginning) context += `\nOpening: ${beginning.substring(0, 600)}`;
+      if (ending) context += `\nClosing: ${ending.substring(0, 600)}`;
     }
   }
 
@@ -493,4 +531,26 @@ export function buildDnaPrompt(book) {
 
   prompt += `\nReturn the DNA JSON.`;
   return prompt;
+}
+
+/**
+ * Build a BATCHED DNA prompt for multiple books (local AI optimization).
+ * Sends N books in one call and expects a JSON array of N DNA objects back.
+ * Uses the compact schema to keep output size manageable for small models.
+ */
+export function buildBatchDnaPrompt(books) {
+  let booksContext = '';
+  books.forEach((book, i) => {
+    booksContext += `\n--- BOOK ${i + 1} ---\n`;
+    booksContext += `Title: ${safe(book.title)}\nAuthor: ${safe(book.author)}\n`;
+    if (book.description) booksContext += `Description: ${safe(book.description.substring(0, 400))}\n`;
+    if (book.genres?.length > 0) booksContext += `Genres: ${book.genres.join(', ')}\n`;
+    if (book.tags?.length > 0) booksContext += `Tags: ${book.tags.slice(0, 8).join(', ')}\n`;
+    if (book.series) booksContext += `Series: ${safe(book.series)}${book.sequence ? ` #${book.sequence}` : ''}\n`;
+    if (book.year || book.published_year) booksContext += `Published: ${book.year || book.published_year}\n`;
+  });
+
+  return `Generate BookDNA for ${books.length} audiobooks below. Return ONLY a JSON array with EXACTLY ${books.length} objects in the same order.
+${booksContext}
+Return: [{...dna for book 1...}, {...dna for book 2...}]`;
 }

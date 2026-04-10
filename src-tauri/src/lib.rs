@@ -1,6 +1,8 @@
 mod scanner;
 mod ollama;
 mod claude_cli;
+mod file_tags;
+mod transcribe;
 
 pub fn run() {
     let app = tauri::Builder::default()
@@ -18,6 +20,9 @@ pub fn run() {
             ollama::ollama_pull_model,
             ollama::ollama_delete_model,
             claude_cli::call_claude_cli,
+            file_tags::read_book_tags,
+            transcribe::detect_transcription_tools,
+            transcribe::transcribe_book,
         ])
         .on_window_event(|_window, event| {
             if let tauri::WindowEvent::Destroyed = event {
